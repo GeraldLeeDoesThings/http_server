@@ -22,9 +22,7 @@ impl MaybeFatal for HTTPServerRunError {
                 socket_listening_error,
                 SocketListeningError::ListeningFailed(_)
             ),
-            Self::SocketAcceptError(socket_accept_error) => {
-                socket_accept_error.is_fatal()
-            }
+            Self::SocketAcceptError(socket_accept_error) => socket_accept_error.is_fatal(),
         }
     }
 }
@@ -44,12 +42,15 @@ impl HTTPServer {
             return HTTPServerRunError::SocketListeningError(err);
         }
         loop {
-            if let Err(err) = self.accept_connections() && err.is_fatal()
+            if let Err(err) = self.accept_connections()
+                && err.is_fatal()
             {
                 return err;
             }
             for connection in &mut self.connections {
-                if let Ok(input_vec) = connection.read() {
+                if let Ok(input_vec) = connection.read()
+                    && !input_vec.is_empty()
+                {
                     println!("Received: {:#?}", input_vec);
                 }
             }

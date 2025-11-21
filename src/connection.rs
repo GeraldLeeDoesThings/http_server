@@ -10,7 +10,7 @@ pub struct Connection {
     buffer: [u8; BUFFER_SIZE],
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum ConnectionReadError {
     ReadError(Errno),
 }
@@ -48,10 +48,15 @@ impl Connection {
 
     pub fn read(&mut self) -> Result<Vec<u8>, ConnectionReadError> {
         let mut collected: Vec<u8> = Vec::new();
-        let mut full_buffer = self.read_once()?;
-        while !full_buffer.is_empty() {
+        let mut read_result = self.read_once();
+        while let Ok(full_buffer) = read_result
+            && !full_buffer.is_empty()
+        {
             collected.extend(full_buffer);
-            full_buffer = self.read_once()?;
+            read_result = self.read_once();
+        }
+        if read_result.is_err_and(|err| err.is_fatal()) {
+            return read_result.map(|_| collected);
         }
         Ok(collected)
     }

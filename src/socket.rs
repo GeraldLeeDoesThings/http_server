@@ -1,7 +1,8 @@
 use std::net::Ipv4Addr;
 
 use libc::{
-    AF_INET, EBADF, EFAULT, EINVAL, ENOTSOCK, EOPNOTSUPP, SOCK_STREAM, in_port_t, sa_family_t, sockaddr_in,
+    AF_INET, EBADF, EFAULT, EINVAL, ENOTSOCK, EOPNOTSUPP, SOCK_NONBLOCK, SOCK_STREAM, in_port_t,
+    sa_family_t, sockaddr_in,
 };
 use syscalls::{Errno, Sysno, syscall};
 
@@ -48,12 +49,15 @@ impl Socket {
         let address_descriptor: sockaddr_in = sockaddr_in {
             sin_family: AF_INET as sa_family_t,
             sin_port: port.to_be(),
-            sin_addr: libc::in_addr { s_addr: address.to_bits().to_be() },
+            sin_addr: libc::in_addr {
+                s_addr: address.to_bits().to_be(),
+            },
             sin_zero: [0; 8],
         };
 
-        let file_descriptor: usize = unsafe { syscall!(Sysno::socket, AF_INET, SOCK_STREAM, 0) }
-            .map_err(SocketCreateError::DescriptorCreationFailed)?;
+        let file_descriptor: usize =
+            unsafe { syscall!(Sysno::socket, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0) }
+                .map_err(SocketCreateError::DescriptorCreationFailed)?;
 
         unsafe {
             syscall!(
@@ -91,7 +95,7 @@ impl Socket {
             return Err(SocketAcceptError::NotListening);
         }
 
-        let result = unsafe { syscall!(Sysno::accept, self.file_descriptor, 0, 0) }
+        let result = unsafe { syscall!(Sysno::accept4, self.file_descriptor, 0, 0, SOCK_NONBLOCK) }
             .map_err(SocketAcceptError::AcceptFailed);
 
         if let Err(ref err) = result
