@@ -114,6 +114,10 @@ impl Socket {
     pub const fn is_listening(&self) -> bool {
         self.listening
     }
+
+    pub const fn get_file_descriptor(&self) -> usize {
+        self.file_descriptor
+    }
 }
 
 impl Drop for Socket {
