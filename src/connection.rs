@@ -1,7 +1,10 @@
 use libc::{EBADF, EDESTADDRREQ, EDQUOT, EFAULT, EFBIG, EINVAL, EIO, EISDIR, ENOSPC, EPERM, EPIPE};
 use syscalls::{Errno, Sysno, syscall};
 
-use crate::error_utils::MaybeFatal;
+use crate::{
+    error_utils::MaybeFatal,
+    request::{Request, RequestParseError},
+};
 
 const BUFFER_SIZE: usize = 256;
 
@@ -13,10 +16,11 @@ pub struct Connection {
     write_index: usize,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum ConnectionReadError {
     ReadError(Errno),
     NotReadyToRead(ConnectionStatus),
+    MalformedRequest(RequestParseError),
 }
 
 pub enum ConnectionResponseError {
@@ -44,6 +48,7 @@ impl MaybeFatal for ConnectionReadError {
                 matches!(errno.into_raw(), EBADF | EFAULT | EINVAL | EIO | EISDIR)
             }
             Self::NotReadyToRead(_) => true,
+            Self::MalformedRequest(_) => false,
         }
     }
 }
@@ -98,7 +103,14 @@ impl Connection {
         })
     }
 
-    pub fn read(&mut self) -> Result<&String, ConnectionReadError> {
+    fn parse_request(&self) -> Result<Request, ConnectionReadError> {
+        self.collector
+            .as_str()
+            .try_into()
+            .map_err(ConnectionReadError::MalformedRequest)
+    }
+
+    pub fn read(&mut self) -> Result<Request, ConnectionReadError> {
         if !self.is_reading() {
             return Err(ConnectionReadError::NotReadyToRead(self.state));
         }
@@ -106,20 +118,24 @@ impl Connection {
         let mut read_result = self.read_once();
         while let Ok(read_size) = read_result {
             if read_size == 0 {
-                return Ok(&self.collector);
+                return self.parse_request();
             }
             read_result = self.read_once();
         }
-        if read_result.is_err_and(|err| err.is_fatal()) {
+        if read_result.as_ref().is_err_and(|err| err.is_fatal()) {
             self.kill();
         }
         if self.is_alive() && self.collector.ends_with("\r\n\r\n") {
             self.state = ConnectionStatus::AwaitingResponse;
-            return Ok(&self.collector);
+            return self.parse_request();
         }
-        read_result
-            .map(|_| &self.collector)
-            .inspect(|_| self.state = ConnectionStatus::AwaitingResponse)
+        match read_result {
+            Ok(_) => {
+                self.state = ConnectionStatus::AwaitingResponse;
+                self.parse_request()
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn write_once(&self) -> Result<usize, ConnectionWriteError> {

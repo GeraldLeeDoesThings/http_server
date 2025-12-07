@@ -55,10 +55,8 @@ impl HTTPServer {
             }
             for connection in &mut self.connections {
                 if connection.is_reading() {
-                    if let Ok(input_vec) = connection.read()
-                        && !input_vec.is_empty()
-                    {
-                        println!("Received: {}", input_vec);
+                    if let Ok(request) = connection.read() {
+                        println!("Received request:\n{}", request);
                     }
                 } else if connection.is_awaiting_response() {
                     let _ = connection.begin_response("HTTP/1.1 204 OK\r\n\r\n");
