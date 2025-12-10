@@ -4,6 +4,7 @@ use syscalls::{Errno, Sysno, syscall};
 use crate::{
     error_utils::MaybeFatal,
     request::{Request, RequestParseError},
+    response::Response,
 };
 
 const BUFFER_SIZE: usize = 256;
@@ -150,12 +151,11 @@ impl Connection {
         .map_err(ConnectionWriteError::WriteError)
     }
 
-    pub fn begin_response(&mut self, data: &str) -> Result<(), ConnectionResponseError> {
+    pub fn begin_response(&mut self, response: &Response) -> Result<(), ConnectionResponseError> {
         if !self.is_awaiting_response() {
             return Err(ConnectionResponseError::NotReadyToRespond(self.state));
         }
-        self.collector.clear();
-        self.collector.push_str(data);
+        self.collector = format!("{}", response);
         self.write_index = 0;
         self.state = ConnectionStatus::Writing;
         Ok(())

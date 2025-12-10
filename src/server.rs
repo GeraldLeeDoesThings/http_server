@@ -6,6 +6,8 @@ use syscalls::syscall;
 use crate::{
     connection::Connection,
     error_utils::MaybeFatal,
+    protocol::Protocol,
+    response::{Response, ResponseCode},
     socket::{Socket, SocketAcceptError, SocketListeningError},
 };
 
@@ -59,7 +61,8 @@ impl HTTPServer {
                         println!("Received request:\n{}", request);
                     }
                 } else if connection.is_awaiting_response() {
-                    let _ = connection.begin_response("HTTP/1.1 204 OK\r\n\r\n");
+                    let _ = connection
+                        .begin_response(&Response::new(ResponseCode::NoContent, Protocol::Http1_1));
                 } else if connection.is_writing() {
                     let _ = connection.write();
                 }
