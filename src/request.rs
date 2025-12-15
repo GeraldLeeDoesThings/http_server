@@ -65,6 +65,16 @@ pub struct Request {
     header_fields: HashMap<Header, String>,
 }
 
+impl Request {
+    pub const fn get_target(&self) -> &String {
+        &self.target
+    }
+
+    pub const fn get_protocol(&self) -> Protocol {
+        self.protocol
+    }
+}
+
 impl TryFrom<&str> for Request {
     type Error = RequestParseError;
 

@@ -6,14 +6,14 @@ use syscalls::syscall;
 use crate::{
     connection::Connection,
     error_utils::MaybeFatal,
-    protocol::Protocol,
-    response::{Response, ResponseCode},
+    router::Router,
     socket::{Socket, SocketAcceptError, SocketListeningError},
 };
 
 pub struct HTTPServer {
     socket: Socket,
     connections: Vec<Connection>,
+    router: Router,
 }
 
 #[derive(Debug)]
@@ -35,10 +35,11 @@ impl MaybeFatal for HTTPServerRunError {
 }
 
 impl HTTPServer {
-    pub const fn new(socket: Socket) -> Self {
+    pub const fn new(socket: Socket, router: Router) -> Self {
         Self {
             socket,
             connections: Vec::new(),
+            router,
         }
     }
 
@@ -59,10 +60,10 @@ impl HTTPServer {
                 if connection.is_reading() {
                     if let Ok(request) = connection.read() {
                         println!("Received request:\n{}", request);
+                        assert!(connection.is_awaiting_response());
+                        let response = self.router.route(connection, &request);
+                        let _ = connection.begin_response(&response);
                     }
-                } else if connection.is_awaiting_response() {
-                    let _ = connection
-                        .begin_response(&Response::new(ResponseCode::NoContent, Protocol::Http1_1));
                 } else if connection.is_writing() {
                     let _ = connection.write();
                 }

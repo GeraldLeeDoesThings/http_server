@@ -95,6 +95,7 @@ impl ResponseCode {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Response {
     code: ResponseCode,
     protocol: Protocol,

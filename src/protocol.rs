@@ -1,3 +1,4 @@
+#[derive(Debug, Clone, Copy)]
 pub enum Protocol {
     Http1_1,
     Http1_0,

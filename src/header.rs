@@ -1,4 +1,4 @@
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum Header {
     ContentLength,
     ContentType,
