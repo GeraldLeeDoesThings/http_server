@@ -63,6 +63,7 @@ pub struct Request {
     target: String,
     protocol: Protocol,
     header_fields: HashMap<Header, String>,
+    path_parameters: HashMap<String, String>,
 }
 
 impl Request {
@@ -72,6 +73,14 @@ impl Request {
 
     pub const fn get_protocol(&self) -> Protocol {
         self.protocol
+    }
+
+    pub const fn get_path_parameters(&self) -> &HashMap<String, String> {
+        &self.path_parameters
+    }
+
+    pub const fn get_path_parameters_mut(&mut self) -> &mut HashMap<String, String> {
+        &mut self.path_parameters
     }
 }
 
@@ -106,6 +115,7 @@ impl TryFrom<&str> for Request {
             target,
             protocol,
             header_fields,
+            path_parameters: HashMap::new(),
         })
     }
 }

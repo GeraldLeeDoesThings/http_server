@@ -100,6 +100,7 @@ pub struct Response {
     code: ResponseCode,
     protocol: Protocol,
     header_fields: HashMap<Header, String>,
+    content: Option<String>,
 }
 
 impl Response {
@@ -108,7 +109,20 @@ impl Response {
             code,
             protocol,
             header_fields: HashMap::new(),
+            content: None,
         }
+    }
+
+    pub fn set_content(&mut self, content: Option<String>) {
+        self.content = content;
+    }
+
+    pub const fn get_headers(&self) -> &HashMap<Header, String> {
+        &self.header_fields
+    }
+
+    pub const fn get_headers_mut(&mut self) -> &mut HashMap<Header, String> {
+        &mut self.header_fields
     }
 }
 
@@ -124,7 +138,10 @@ impl Display for Response {
         for (header, field) in &self.header_fields {
             writeln!(f, "{}: {}", header.as_str(), field)?;
         }
-        write!(f, "\r\n\r\n")?;
+        writeln!(f)?;
+        if let Some(content) = &self.content {
+            write!(f, "{}", content)?;
+        }
         Ok(())
     }
 }
