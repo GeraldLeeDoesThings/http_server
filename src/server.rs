@@ -58,11 +58,15 @@ impl HTTPServer {
             }
             for connection in &mut self.connections {
                 if connection.is_reading() {
-                    if let Ok(mut request) = connection.read() {
+                    let read_result = connection.read();
+                    if let Ok(mut request) = read_result {
                         println!("Received request:\n{}", request);
                         assert!(connection.is_awaiting_response());
                         let response = self.router.route(connection, &mut request);
                         let _ = connection.begin_response(&response);
+                    }
+                    else {
+                        println!("Error while reading: {:?}", read_result);
                     }
                 } else if connection.is_writing() {
                     let _ = connection.write();

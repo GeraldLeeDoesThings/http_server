@@ -3,7 +3,7 @@ use syscalls::{Errno, Sysno, syscall};
 
 use crate::{
     error_utils::MaybeFatal,
-    request::{Request, RequestParseError},
+    request::{Request, RequestFactory, RequestParseError},
     response::Response,
 };
 
@@ -15,6 +15,7 @@ pub struct Connection {
     state: ConnectionStatus,
     collector: String,
     write_index: usize,
+    request_factory: Option<RequestFactory>,
 }
 
 #[derive(Clone, Debug)]
@@ -22,6 +23,7 @@ pub enum ConnectionReadError {
     ReadError(Errno),
     NotReadyToRead(ConnectionStatus),
     MalformedRequest(RequestParseError),
+    RequestIncomplete,
 }
 
 pub enum ConnectionResponseError {
@@ -36,7 +38,8 @@ pub enum ConnectionWriteError {
 
 #[derive(Clone, Copy, Debug)]
 pub enum ConnectionStatus {
-    Reading,
+    ReadingHeaders,
+    ReadingContent(usize),
     AwaitingResponse,
     Writing,
     Dead,
@@ -48,7 +51,7 @@ impl MaybeFatal for ConnectionReadError {
             Self::ReadError(errno) => {
                 matches!(errno.into_raw(), EBADF | EFAULT | EINVAL | EIO | EISDIR)
             }
-            Self::NotReadyToRead(_) => true,
+            Self::NotReadyToRead(_) | Self::RequestIncomplete => true,
             Self::MalformedRequest(_) => false,
         }
     }
@@ -72,7 +75,7 @@ impl MaybeFatal for ConnectionWriteError {
                         | EPIPE
                 )
             }
-            Self::NotReadyToWrite(state) => matches!(state, ConnectionStatus::Reading),
+            Self::NotReadyToWrite(state) => matches!(state, ConnectionStatus::ReadingHeaders),
         }
     }
 }
@@ -82,9 +85,10 @@ impl Connection {
         Self {
             descriptor,
             buffer: [0; BUFFER_SIZE],
-            state: ConnectionStatus::Reading,
+            state: ConnectionStatus::ReadingHeaders,
             collector: String::new(),
             write_index: 0,
+            request_factory: Some(RequestFactory::new()),
         }
     }
 
@@ -104,13 +108,6 @@ impl Connection {
         })
     }
 
-    fn parse_request(&self) -> Result<Request, ConnectionReadError> {
-        self.collector
-            .as_str()
-            .try_into()
-            .map_err(ConnectionReadError::MalformedRequest)
-    }
-
     pub fn read(&mut self) -> Result<Request, ConnectionReadError> {
         if !self.is_reading() {
             return Err(ConnectionReadError::NotReadyToRead(self.state));
@@ -119,22 +116,40 @@ impl Connection {
         let mut read_result = self.read_once();
         while let Ok(read_size) = read_result {
             if read_size == 0 {
-                return self.parse_request();
+                break;
             }
             read_result = self.read_once();
         }
-        if read_result.as_ref().is_err_and(|err| err.is_fatal()) {
+        if let Err(error) = read_result.as_ref() && error.is_fatal() {
             self.kill();
+            return Err(error.clone());
         }
-        if self.is_alive() && self.collector.ends_with("\r\n\r\n") {
+        if let Err(error) = self
+            .request_factory
+            .as_mut()
+            .expect("Tried to process read result without request factory.")
+            .process_str(&self.collector)
+        {
+            self.kill();
+            return Err(ConnectionReadError::MalformedRequest(error));
+        }
+        self.collector.clear();
+        if self.is_alive()
+            && self
+                .request_factory
+                .as_ref()
+                .is_some_and(|req_fact| req_fact.is_completed())
+        {
             self.state = ConnectionStatus::AwaitingResponse;
-            return self.parse_request();
+            return self
+                .request_factory
+                .take()
+                .expect("Request factory missing inside guard.")
+                .try_into()
+                .map_err(ConnectionReadError::MalformedRequest);
         }
         match read_result {
-            Ok(_) => {
-                self.state = ConnectionStatus::AwaitingResponse;
-                self.parse_request()
-            }
+            Ok(_) => Err(ConnectionReadError::RequestIncomplete),
             Err(err) => Err(err),
         }
     }
@@ -189,7 +204,10 @@ impl Connection {
     }
 
     pub const fn is_reading(&self) -> bool {
-        matches!(self.state, ConnectionStatus::Reading)
+        matches!(
+            self.state,
+            ConnectionStatus::ReadingHeaders | ConnectionStatus::ReadingContent(_)
+        )
     }
 
     pub const fn is_writing(&self) -> bool {
