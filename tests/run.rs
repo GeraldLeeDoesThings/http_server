@@ -38,8 +38,8 @@ impl Handler for EchoHandler {
     }
 }
 
-#[test]
-fn run_server() {
+#[tokio::test]
+async fn run_server() {
     let mut router = BaseRouter::new();
     router.register_handler_from_path(EchoHandler {}, "/hello/{foo}/bar/baz/{biz}");
     println!("{}", router);
@@ -47,5 +47,5 @@ fn run_server() {
         Socket::new(5000, Ipv4Addr::new(127, 0, 0, 1)).unwrap(),
         router,
     );
-    server.run();
+    server.run().await;
 }

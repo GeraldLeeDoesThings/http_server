@@ -34,7 +34,7 @@ impl PathParameterRouter {
 
 pub struct BaseRouter {
     sub_routers: HashMap<String, Box<Self>>,
-    handler: Option<Box<dyn Handler>>,
+    handler: Option<Box<dyn Handler + Send>>,
     wildcard: Option<Box<PathParameterRouter>>,
 }
 
@@ -82,10 +82,10 @@ impl<'a> BaseRouter {
         }
     }
 
-    pub fn register_handler<T: Handler + 'static>(
+    pub fn register_handler<T: Handler + Send + 'static>(
         &mut self,
         handler: T,
-    ) -> Option<Box<dyn Handler>> {
+    ) -> Option<Box<dyn Handler + Send>> {
         self.handler.replace(Box::new(handler))
     }
 
@@ -121,7 +121,11 @@ impl<'a> BaseRouter {
         }
     }
 
-    pub fn register_handler_from_path<T: Handler + 'static>(&mut self, handler: T, path: &str) {
+    pub fn register_handler_from_path<T: Handler + Send + 'static>(
+        &mut self,
+        handler: T,
+        path: &str,
+    ) {
         self.create_route(&mut path.split('/'))
             .register_handler(handler);
     }

@@ -7,3 +7,4 @@ edition = "2024"
 libc = "0.2.177"
 serde_json = "1.0.145"
 syscalls = "0.7.0"
+tokio = { version = "1.49.0", features = ["macros", "rt"] }

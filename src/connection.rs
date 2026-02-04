@@ -26,6 +26,7 @@ pub enum ConnectionReadError {
     RequestIncomplete,
 }
 
+#[derive(Debug)]
 pub enum ConnectionResponseError {
     NotReadyToRespond(ConnectionStatus),
 }
@@ -120,7 +121,9 @@ impl Connection {
             }
             read_result = self.read_once();
         }
-        if let Err(error) = read_result.as_ref() && error.is_fatal() {
+        if let Err(error) = read_result.as_ref()
+            && error.is_fatal()
+        {
             self.kill();
             return Err(error.clone());
         }

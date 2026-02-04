@@ -177,7 +177,7 @@ impl Display for Request {
         for (header, field) in &self.header_fields {
             writeln!(f, "{}: {}", header.as_str(), field)?;
         }
-        write!(f, "\r\n\r\n{}", self.content)?;
+        write!(f, "\r\n{}", self.content)?;
         Ok(())
     }
 }
@@ -291,7 +291,7 @@ impl RequestFactory {
                                 self.buffer.push_str(&str[0..=index]);
                                 self.finalize_headers()?;
                                 if str.len() > index {
-                                    return self.process_str(&str[index+1..]);
+                                    return self.process_str(&str[index + 1..]);
                                 }
                             }
                             RequestFactoryState::ParsingHeaders => {
@@ -366,7 +366,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_request_factory_single_transition() {
+    fn request_factory_single_transition() {
         let mut factory = RequestFactory::new();
         assert_eq!(factory.state, RequestFactoryState::ParsingHeaders);
         assert!(factory.process_str("\r\n").is_ok());
@@ -374,50 +374,72 @@ mod tests {
     }
 
     #[test]
-    fn test_request_factory_breakout_blank() {
+    fn request_factory_breakout_blank() {
         let mut factory = RequestFactory::new();
         assert_eq!(factory.state, RequestFactoryState::ParsingHeaders);
-        assert_eq!(factory.process_str("\r\n\r\n"), Err(RequestParseError::MethodMissing));
+        assert_eq!(
+            factory.process_str("\r\n\r\n"),
+            Err(RequestParseError::MethodMissing)
+        );
         assert_eq!(factory.state, RequestFactoryState::ParsingHeaderStop);
     }
 
     #[test]
-    fn test_request_factory_no_length() {
+    fn request_factory_no_length() {
         let mut factory = RequestFactory::new();
         assert_eq!(factory.state, RequestFactoryState::ParsingHeaders);
-        assert_eq!(factory.process_str("GET /test HTTP/1.1\r\n\r\n"), Err(RequestParseError::ContentLengthMissing));
+        assert_eq!(
+            factory.process_str("GET /test HTTP/1.1\r\n\r\n"),
+            Err(RequestParseError::ContentLengthMissing)
+        );
         assert_eq!(factory.state, RequestFactoryState::ParsingHeaderStop);
     }
 
     #[test]
-    fn test_request_factory_no_content() {
+    fn request_factory_no_content() {
         let mut factory = RequestFactory::new();
         assert_eq!(factory.state, RequestFactoryState::ParsingHeaders);
-        assert!(factory.process_str("GET /test HTTP/1.1\r\nContent-Length: 0\r\n\r\n").is_ok());
+        assert!(
+            factory
+                .process_str("GET /test HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+                .is_ok()
+        );
         assert_eq!(factory.state, RequestFactoryState::Completed);
     }
 
     #[test]
-    fn test_request_factory_content_missing() {
+    fn request_factory_content_missing() {
         let mut factory = RequestFactory::new();
         assert_eq!(factory.state, RequestFactoryState::ParsingHeaders);
-        assert!(factory.process_str("GET /test HTTP/1.1\r\nContent-Length: 5\r\n\r\n").is_ok());
+        assert!(
+            factory
+                .process_str("GET /test HTTP/1.1\r\nContent-Length: 5\r\n\r\n")
+                .is_ok()
+        );
         assert_eq!(factory.state, RequestFactoryState::ParsingBody(5));
     }
 
     #[test]
-    fn test_request_factory_newline_content() {
+    fn request_factory_newline_content() {
         let mut factory = RequestFactory::new();
         assert_eq!(factory.state, RequestFactoryState::ParsingHeaders);
-        assert!(factory.process_str("GET /test HTTP/1.1\r\nContent-Length: 1\r\n\r\n\n").is_ok());
+        assert!(
+            factory
+                .process_str("GET /test HTTP/1.1\r\nContent-Length: 1\r\n\r\n\n")
+                .is_ok()
+        );
         assert_eq!(factory.state, RequestFactoryState::Completed);
     }
 
     #[test]
-    fn test_request_factory_content() {
+    fn request_factory_content() {
         let mut factory = RequestFactory::new();
         assert_eq!(factory.state, RequestFactoryState::ParsingHeaders);
-        assert!(factory.process_str("GET /test HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello").is_ok());
+        assert!(
+            factory
+                .process_str("GET /test HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello")
+                .is_ok()
+        );
         assert_eq!(factory.state, RequestFactoryState::Completed);
         assert_eq!(factory.content, "hello");
     }
