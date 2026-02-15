@@ -48,7 +48,7 @@ impl MaybeFatal for HTTPServerRunError {
 
 impl HTTPServer {
     pub fn new(socket: Socket, router: BaseRouter) -> Self {
-        let event_buffer = Arc::new(Mutex::new(Vec::with_capacity(EVENT_BUFFER_SIZE)));
+        // let event_buffer = Arc::new(Mutex::new(Vec::with_capacity(EVENT_BUFFER_SIZE)));
         let socket_file_descriptor = socket.get_file_descriptor();
         let epoll = Arc::new(EPoll::new().expect("Failed to create epoll to wake server."));
         epoll.add(socket_file_descriptor, true, false).expect("");
@@ -57,7 +57,7 @@ impl HTTPServer {
             connections: HashMap::new(),
             router,
             epoll: epoll.clone(),
-            notifier: HTTPServerNotifier::new(event_buffer, epoll),
+            notifier: HTTPServerNotifier::new(epoll),
         }
     }
 
@@ -81,33 +81,35 @@ impl HTTPServer {
                 let mut entry = match self.connections.entry(file_descriptor) {
                     std::collections::hash_map::Entry::Occupied(occupied_entry) => occupied_entry,
                     std::collections::hash_map::Entry::Vacant(_vacant_entry) => {
-                        self.epoll
-                            .delete(file_descriptor)
-                            .expect("Failed to update epoll");
+                        let _ = self.epoll.delete(file_descriptor);
                         continue;
                     }
                 };
                 match (event, entry.get_mut()) {
                     (event, connection) if event.readable() && connection.is_reading() => {
-                        let read_result = connection.read();
-                        if let Ok(mut request) = read_result {
-                            println!("Received request:\n{}", request);
-                            assert!(connection.is_awaiting_response());
-                            let response = self.router.route(connection, &mut request);
-                            connection
-                                .begin_response(&response)
-                                .expect("Connection not ready to write after checking.");
-                            assert!(connection.is_writing());
-                            assert!(!connection.is_reading());
-                            self.epoll
-                                .modify(file_descriptor, false, true)
-                                .expect("Failed to update epoll");
-                        } else {
-                            println!("Error while reading: {:?}", read_result);
-                            self.epoll
-                                .delete(file_descriptor)
-                                .expect("Failed to update epoll");
-                            entry.remove();
+                        match connection.read() {
+                            Ok(mut request) => {
+                                println!("Received request:\n{}", request);
+                                assert!(connection.is_awaiting_response());
+                                let response = self.router.route(connection, &mut request).await;
+                                connection
+                                    .begin_response(&response)
+                                    .expect("Connection not ready to write after checking.");
+                                assert!(connection.is_writing());
+                                assert!(!connection.is_reading());
+                                self.epoll
+                                    .modify(file_descriptor, false, true)
+                                    .expect("Failed to update epoll");
+                            }
+                            Err(read_error) => {
+                                println!("Error while reading: {:?}", read_error);
+                                if read_error.is_fatal() {
+                                    self.epoll
+                                        .delete(file_descriptor)
+                                        .expect("Failed to update epoll");
+                                    entry.remove();
+                                }
+                            }
                         }
                     }
                     (event, connection) if event.writable() && connection.is_writing() => {
@@ -121,7 +123,19 @@ impl HTTPServer {
                             entry.remove();
                         }
                     }
-                    _ => unreachable!("epoll state mismatch."),
+                    (event, connection) if event.readable() && connection.is_writing() => {
+                        // Stale event
+                        assert!(!connection.is_reading());
+                    }
+                    (event, connection) => {
+                        panic!(
+                            "Unexpected event / connection pair: event: {:?} r: {} w: {}\nconnection: {:?}",
+                            event,
+                            event.readable(),
+                            event.writable(),
+                            connection
+                        );
+                    }
                 }
             }
         }
@@ -149,7 +163,6 @@ impl HTTPServer {
 #[derive(Debug)]
 enum WakerStatus {
     New(Waker),
-    Success,
     Waiting,
     Closed,
 }
@@ -166,71 +179,84 @@ impl WakerStatus {
     }
 }
 
+#[derive(Debug)]
+struct NotifierSharedData {
+    buffer: Vec<EPollEvent>,
+    waker: WakerStatus,
+}
+
+impl Default for NotifierSharedData {
+    fn default() -> Self {
+        Self {
+            buffer: Vec::with_capacity(EVENT_BUFFER_SIZE),
+            waker: Default::default(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
-struct NotiferSharedData {
-    start_notifier: Arc<Condvar>,
-    start_mutex: Arc<Mutex<bool>>,
-    waker_notifier: Arc<Condvar>,
-    waker_mutex: Arc<Mutex<WakerStatus>>,
+struct NotiferSharedObjects {
+    notifier: Arc<Condvar>,
+    data: Arc<Mutex<NotifierSharedData>>,
 }
 
 struct HTTPServerNotifierSleeper {
-    shared_data: NotiferSharedData,
-    buffer: Arc<Mutex<Vec<EPollEvent>>>,
+    shared_data: NotiferSharedObjects,
     poller: Arc<EPoll>,
 }
 
 impl HTTPServerNotifierSleeper {
     fn run(&self) {
-        loop {
-            *self
+        let mut exit_signal: bool = false;
+        let mut waker: Option<Waker> = None;
+        while !exit_signal {
+            while let buffer = &mut self
                 .shared_data
-                .start_notifier
+                .data
+                .lock()
+                .expect("Server thread has panicked!")
+                .buffer
+                && buffer.is_empty()
+            {
+                self.poller.wait(buffer);
+            }
+            let _data_ref = self
+                .shared_data
+                .notifier
                 .wait_while(
                     self.shared_data
-                        .start_mutex
+                        .data
                         .lock()
                         .expect("Server thread has panicked!"),
-                    |&mut start_signal| !start_signal,
+                    |data| {
+                        let buffer_is_nonempty = !data.buffer.is_empty();
+                        match data.waker.take() {
+                            WakerStatus::New(new_waker) => {
+                                waker.replace(new_waker);
+                            }
+                            WakerStatus::Closed => exit_signal = true,
+                            WakerStatus::Waiting => {}
+                        };
+                        if buffer_is_nonempty && let Some(waker) = waker.take() {
+                            waker.wake()
+                        }
+                        !data.buffer.is_empty() && !exit_signal
+                    },
                 )
-                .expect("Server thread has panicked!") = false;
-            self.poller
-                .wait(&mut self.buffer.lock().expect("Server thread has panicked!"));
-            loop {
-                let waker_status = self
-                    .shared_data
-                    .waker_notifier
-                    .wait_while(
-                        self.shared_data
-                            .waker_mutex
-                            .lock()
-                            .expect("Server thread has panicked!"),
-                        |waker_status| matches!(waker_status, WakerStatus::Waiting),
-                    )
-                    .expect("Server thread has panicked!")
-                    .take();
-                match waker_status {
-                    WakerStatus::New(waker) => waker.wake(),
-                    WakerStatus::Success => break,
-                    WakerStatus::Waiting => unreachable!("Guarded by condition variable."),
-                    WakerStatus::Closed => return,
-                }
-            }
+                .expect("Server thread has panicked!");
         }
     }
 }
 
 struct HTTPServerNotifier {
     notifier_thread: JoinHandle<()>,
-    buffer: Arc<Mutex<Vec<EPollEvent>>>,
-    shared_data: NotiferSharedData,
+    shared_data: NotiferSharedObjects,
     epoll_waker: EventFD,
 }
 
 impl HTTPServerNotifier {
-    fn new(buffer: Arc<Mutex<Vec<EPollEvent>>>, poller: Arc<EPoll>) -> Self {
-        let shared_data = NotiferSharedData::default();
-        let buffer_clone = buffer.clone();
+    fn new(poller: Arc<EPoll>) -> Self {
+        let shared_data = NotiferSharedObjects::default();
         let data_clone = shared_data.clone();
         let epoll_waker = EventFD::new().expect("Failed to create event.");
         poller
@@ -239,7 +265,6 @@ impl HTTPServerNotifier {
         let notifier_thread = thread::spawn(|| {
             let sleeper = HTTPServerNotifierSleeper {
                 shared_data: data_clone,
-                buffer: buffer_clone,
                 poller,
             };
             sleeper.run();
@@ -247,7 +272,6 @@ impl HTTPServerNotifier {
 
         Self {
             notifier_thread,
-            buffer,
             shared_data,
             epoll_waker,
         }
@@ -259,17 +283,13 @@ impl Drop for HTTPServerNotifier {
         self.epoll_waker.set();
         let mut attempts = 0;
         while !self.notifier_thread.is_finished() && attempts < 100000 {
-            if self
-                .shared_data
-                .waker_mutex
-                .set(WakerStatus::Closed)
-                .is_err()
-                || self.shared_data.start_mutex.set(true).is_err()
-            {
-                return;
+            match self.shared_data.data.lock() {
+                Ok(mut data) => {
+                    data.waker = WakerStatus::Closed;
+                }
+                Err(_) => return,
             }
-            self.shared_data.start_notifier.notify_all();
-            self.shared_data.waker_notifier.notify_all();
+            self.shared_data.notifier.notify_all();
             attempts += 1;
         }
     }
@@ -282,31 +302,22 @@ impl Future for &mut HTTPServerNotifier {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        let mut buffer = self.buffer.lock().expect("Notifier thread panicked.");
-        if !buffer.is_empty() {
-            let events = Vec::from_iter(buffer.drain(..));
-            drop(buffer);
-            *self
-                .shared_data
-                .waker_mutex
-                .lock()
-                .expect("Notifier thread panicked.") = WakerStatus::Success;
-            self.shared_data.waker_notifier.notify_one();
+        let mut data = self
+            .shared_data
+            .data
+            .lock()
+            .expect("Notifier thread panicked.");
+        if !data.buffer.is_empty() {
+            let events = Vec::from_iter(data.buffer.drain(..));
+            data.waker = WakerStatus::Waiting;
+            drop(data);
+            self.shared_data.notifier.notify_one();
             return Ready(events);
         }
 
-        *self
-            .shared_data
-            .waker_mutex
-            .lock()
-            .expect("Notifier thread panicked.") = WakerStatus::New(cx.waker().clone());
-        self.shared_data.waker_notifier.notify_one();
-        *self
-            .shared_data
-            .start_mutex
-            .lock()
-            .expect("Notifier thread panicked.") = true;
-        self.shared_data.start_notifier.notify_one();
+        data.waker = WakerStatus::New(cx.waker().clone());
+        drop(data);
+        self.shared_data.notifier.notify_one();
         Pending
     }
 }

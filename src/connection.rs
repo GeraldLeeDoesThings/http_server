@@ -9,6 +9,7 @@ use crate::{
 
 const BUFFER_SIZE: usize = 256;
 
+#[derive(Debug)]
 pub struct Connection {
     descriptor: usize,
     buffer: [u8; BUFFER_SIZE],

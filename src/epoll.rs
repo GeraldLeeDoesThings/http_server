@@ -44,6 +44,7 @@ impl From<i32> for EPollCtlError {
     }
 }
 
+#[derive(Debug)]
 #[repr(transparent)]
 pub struct EPollEvent {
     event_bits: epoll_event,
@@ -80,6 +81,9 @@ impl EPoll {
                 usize::MAX
             ) {
                 Ok(num_events) => {
+                    if num_events == 0 {
+                        panic!("bad");
+                    }
                     buffer.set_len(num_events);
                 }
                 Err(errno) => match errno.into_raw() {

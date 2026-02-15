@@ -191,6 +191,7 @@ pub enum RequestFactoryState {
     Failed(RequestParseError),
 }
 
+#[derive(Debug)]
 pub struct RequestFactory {
     method: Option<Method>,
     target: Option<String>,

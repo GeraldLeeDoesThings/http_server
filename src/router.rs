@@ -2,7 +2,7 @@ use std::{collections::HashMap, fmt::Display, str::Split};
 
 use crate::{
     connection::Connection,
-    handler::Handler,
+    handler::{AnyHandler, AsyncHandler, Handler},
     request::Request,
     response::{Response, ResponseCode},
 };
@@ -34,7 +34,7 @@ impl PathParameterRouter {
 
 pub struct BaseRouter {
     sub_routers: HashMap<String, Box<Self>>,
-    handler: Option<Box<dyn Handler + Send>>,
+    handler: Option<AnyHandler>,
     wildcard: Option<Box<PathParameterRouter>>,
 }
 
@@ -53,12 +53,13 @@ impl<'a> BaseRouter {
         }
     }
 
-    pub fn route(&mut self, connection: &mut Connection, request: &mut Request) -> Response {
+    pub async fn route(&mut self, connection: &mut Connection, request: &mut Request) -> Response {
         self.route_from_path(
             connection,
             request,
             &mut request.get_target().clone().split('/'),
         )
+        .await
     }
 
     fn resolve_route_mut(
@@ -85,8 +86,16 @@ impl<'a> BaseRouter {
     pub fn register_handler<T: Handler + Send + 'static>(
         &mut self,
         handler: T,
-    ) -> Option<Box<dyn Handler + Send>> {
-        self.handler.replace(Box::new(handler))
+    ) -> Option<AnyHandler> {
+        self.handler.replace(AnyHandler::from_handler(handler))
+    }
+
+    pub fn register_async_handler<T: AsyncHandler + Send + 'static>(
+        &mut self,
+        handler: T,
+    ) -> Option<AnyHandler> {
+        self.handler
+            .replace(AnyHandler::from_async_handler(handler))
     }
 
     pub fn create_route(&mut self, path: &mut Split<'a, char>) -> &mut Self {
@@ -125,25 +134,36 @@ impl<'a> BaseRouter {
         &mut self,
         handler: T,
         path: &str,
-    ) {
+    ) -> Option<AnyHandler> {
         self.create_route(&mut path.split('/'))
-            .register_handler(handler);
+            .register_handler(handler)
     }
 
-    fn route_from_path(
+    pub fn register_async_handler_from_path<T: AsyncHandler + Send + 'static>(
+        &mut self,
+        handler: T,
+        path: &str,
+    ) -> Option<AnyHandler> {
+        self.create_route(&mut path.split('/'))
+            .register_async_handler(handler)
+    }
+
+    async fn route_from_path(
         &mut self,
         connection: &mut Connection,
         request: &'a mut Request,
         path: &mut Split<'a, char>,
     ) -> Response {
-        self.resolve_route_mut(path, request)
-            .and_then(|router| {
-                router
-                    .handler
-                    .as_mut()
-                    .map(|handler| handler.handle(connection, request))
-            })
-            .unwrap_or_else(|| Response::new(ResponseCode::NotFound, request.get_protocol()))
+        match self
+            .resolve_route_mut(path, request)
+            .and_then(|router: &mut Self| router.handler.as_mut())
+        {
+            Some(AnyHandler::Sync(handler)) => handler.handle(connection, request),
+            Some(AnyHandler::Async(async_handler)) => {
+                async_handler.handle(connection, request).await
+            }
+            None => Response::new(ResponseCode::NotFound, request.get_protocol()),
+        }
     }
 }
 

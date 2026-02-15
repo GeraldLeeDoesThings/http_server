@@ -1,4 +1,5 @@
 #![warn(clippy::all, clippy::nursery)]
+#![feature(box_into_inner)]
 #![feature(const_default)]
 #![feature(const_trait_impl)]
 #![feature(lock_value_accessors)]
