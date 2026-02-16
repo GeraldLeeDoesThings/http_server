@@ -1,3 +1,5 @@
+use tokio::task::JoinHandle;
+
 use crate::{connection::Connection, request::Request, response::Response};
 
 pub enum AnyHandler {
@@ -32,7 +34,9 @@ impl AnyHandler {
     ) -> Option<Response> {
         match self {
             Self::Sync(_) => None,
-            Self::Async(async_handler) => Some(async_handler.handle(connection, request).await),
+            Self::Async(async_handler) => {
+                Some(async_handler.handle(connection, request).await.unwrap())
+            }
         }
     }
 }
@@ -42,11 +46,7 @@ pub trait Handler: Send {
 }
 
 pub trait AsyncHandler: Send {
-    fn handle(
-        &mut self,
-        connection: &mut Connection,
-        request: &Request,
-    ) -> Box<dyn Future<Output = Response> + Send + Unpin>;
+    fn handle(&mut self, connection: &mut Connection, request: &Request) -> JoinHandle<Response>;
 }
 
 pub struct ConstantHandler {

@@ -11,21 +11,34 @@ use std::{
 
 const EVENT_BUFFER_SIZE: usize = 1024;
 
+use tokio::task::JoinSet;
+
 use crate::{
     connection::Connection,
     epoll::{EPoll, EPollEvent},
     error_utils::MaybeFatal,
     event::EventFD,
+    response::{MaybeResponse, Response},
     router::BaseRouter,
     socket::{Socket, SocketAcceptError, SocketListeningError},
 };
+
+struct ResolvedResponse {
+    response: Response,
+    connection_descriptor: usize,
+}
+
+enum ServerEvent {
+    EPollEvents(Vec<EPollEvent>),
+    ResponseReady(ResolvedResponse),
+}
 
 pub struct HTTPServer {
     socket: Socket,
     connections: HashMap<usize, Connection>,
     router: BaseRouter,
     epoll: Arc<EPoll>,
-    notifier: HTTPServerNotifier,
+    pending_events: JoinSet<ServerEvent>,
 }
 
 #[derive(Debug)]
@@ -56,42 +69,36 @@ impl HTTPServer {
             socket,
             connections: HashMap::new(),
             router,
-            epoll: epoll.clone(),
-            notifier: HTTPServerNotifier::new(epoll),
+            epoll,
+            pending_events: JoinSet::new(),
         }
     }
 
-    pub async fn run(&mut self) -> HTTPServerRunError {
-        if !self.socket.is_listening()
-            && let Err(err) = self.socket.start_listening()
-        {
-            return HTTPServerRunError::SocketListeningError(err);
+    async fn handle_event(&mut self, event: EPollEvent) -> Result<(), HTTPServerRunError> {
+        let file_descriptor = event.file_descriptor();
+        if file_descriptor == self.socket.get_file_descriptor() {
+            if let Err(err) = self.accept_connections()
+                && err.is_fatal()
+            {
+                return Err(err);
+            }
+            return Ok(());
         }
-        loop {
-            for event in (&mut self.notifier).await {
-                let file_descriptor = event.file_descriptor();
-                if file_descriptor == self.socket.get_file_descriptor() {
-                    if let Err(err) = self.accept_connections()
-                        && err.is_fatal()
-                    {
-                        return err;
-                    }
-                    continue;
-                }
-                let mut entry = match self.connections.entry(file_descriptor) {
-                    std::collections::hash_map::Entry::Occupied(occupied_entry) => occupied_entry,
-                    std::collections::hash_map::Entry::Vacant(_vacant_entry) => {
-                        let _ = self.epoll.delete(file_descriptor);
-                        continue;
-                    }
-                };
-                match (event, entry.get_mut()) {
-                    (event, connection) if event.readable() && connection.is_reading() => {
-                        match connection.read() {
-                            Ok(mut request) => {
-                                println!("Received request:\n{}", request);
-                                assert!(connection.is_awaiting_response());
-                                let response = self.router.route(connection, &mut request).await;
+        let mut entry = match self.connections.entry(file_descriptor) {
+            std::collections::hash_map::Entry::Occupied(occupied_entry) => occupied_entry,
+            std::collections::hash_map::Entry::Vacant(_vacant_entry) => {
+                let _ = self.epoll.delete(file_descriptor);
+                return Ok(());
+            }
+        };
+        match (event, entry.get_mut()) {
+            (event, connection) if event.readable() && connection.is_reading() => {
+                match connection.read() {
+                    Ok(mut request) => {
+                        println!("Received request:\n{}", request);
+                        assert!(connection.is_awaiting_response());
+                        match self.router.route(connection, &mut request) {
+                            MaybeResponse::Now(response) => {
                                 connection
                                     .begin_response(&response)
                                     .expect("Connection not ready to write after checking.");
@@ -101,42 +108,98 @@ impl HTTPServer {
                                     .modify(file_descriptor, false, true)
                                     .expect("Failed to update epoll");
                             }
-                            Err(read_error) => {
-                                println!("Error while reading: {:?}", read_error);
-                                if read_error.is_fatal() {
-                                    self.epoll
-                                        .delete(file_descriptor)
-                                        .expect("Failed to update epoll");
-                                    entry.remove();
-                                }
+                            MaybeResponse::Later(future) => {
+                                self.pending_events.spawn(async move {
+                                    ServerEvent::ResponseReady(ResolvedResponse {
+                                        response: future.await.expect("Request handler failed."),
+                                        connection_descriptor: file_descriptor,
+                                    })
+                                });
                             }
-                        }
+                        };
                     }
-                    (event, connection) if event.writable() && connection.is_writing() => {
-                        if let Err(error) = connection.write() {
-                            println!("Error while writing: {:?}", error);
-                        }
-                        if !connection.is_alive() {
+                    Err(read_error) => {
+                        println!("Error while reading: {:?}", read_error);
+                        if read_error.is_fatal() {
                             self.epoll
                                 .delete(file_descriptor)
                                 .expect("Failed to update epoll");
                             entry.remove();
                         }
                     }
-                    (event, connection) if event.readable() && connection.is_writing() => {
-                        // Stale event
-                        assert!(!connection.is_reading());
+                };
+                Ok(())
+            }
+            (event, connection) if event.writable() && connection.is_writing() => {
+                if let Err(error) = connection.write() {
+                    println!("Error while writing: {:?}", error);
+                }
+                if !connection.is_alive() {
+                    self.epoll
+                        .delete(file_descriptor)
+                        .expect("Failed to update epoll");
+                    entry.remove();
+                }
+                Ok(())
+            }
+            (event, connection)
+                if event.readable()
+                    && (connection.is_writing() || connection.is_awaiting_response()) =>
+            {
+                // Stale event
+                assert!(!connection.is_reading());
+                Ok(())
+            }
+            (event, connection) => {
+                panic!(
+                    "Unexpected event / connection pair: event: {:?} r: {} w: {}\nconnection: {:?}",
+                    event,
+                    event.readable(),
+                    event.writable(),
+                    connection
+                );
+            }
+        }
+    }
+
+    pub async fn run(&mut self) -> HTTPServerRunError {
+        if !self.socket.is_listening()
+            && let Err(err) = self.socket.start_listening()
+        {
+            return HTTPServerRunError::SocketListeningError(err);
+        }
+        let notifier =
+            Box::leak(Box::new(HTTPServerNotifier::new(self.epoll.clone()))) as &HTTPServerNotifier;
+        self.pending_events.spawn(notifier);
+        loop {
+            match self.pending_events.join_next().await.expect(
+                "Server event tasks are empty, but at least the epoll task should be present.",
+            ) {
+                Ok(ServerEvent::EPollEvents(events)) => {
+                    for event in events {
+                        match self.handle_event(event).await {
+                            Ok(_) => {} // Nothing went wrong, event was handled successfully
+                            Err(error) => return error,
+                        }
                     }
-                    (event, connection) => {
-                        panic!(
-                            "Unexpected event / connection pair: event: {:?} r: {} w: {}\nconnection: {:?}",
-                            event,
-                            event.readable(),
-                            event.writable(),
-                            connection
-                        );
+                    self.pending_events.spawn(notifier);
+                }
+                Ok(ServerEvent::ResponseReady(resolved_response)) => {
+                    if let Some(connection) = self
+                        .connections
+                        .get_mut(&resolved_response.connection_descriptor)
+                    {
+                        connection
+                            .begin_response(&resolved_response.response)
+                            .expect("Connection not ready to write after checking.");
+                        assert!(connection.is_writing());
+                        assert!(!connection.is_reading());
+                        self.epoll
+                            .modify(resolved_response.connection_descriptor, false, true)
+                            .expect("Failed to update epoll");
                     }
                 }
+                Err(_) => panic!("Server task panicked."),
             }
         }
     }
@@ -179,25 +242,23 @@ impl WakerStatus {
     }
 }
 
-#[derive(Debug)]
-struct NotifierSharedData {
-    buffer: Vec<EPollEvent>,
-    waker: WakerStatus,
-}
-
-impl Default for NotifierSharedData {
-    fn default() -> Self {
-        Self {
-            buffer: Vec::with_capacity(EVENT_BUFFER_SIZE),
-            waker: Default::default(),
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 struct NotiferSharedObjects {
     notifier: Arc<Condvar>,
-    data: Arc<Mutex<NotifierSharedData>>,
+    buffer: Arc<Mutex<Vec<EPollEvent>>>,
+    waker: Arc<Mutex<WakerStatus>>,
+    check_guard: Arc<Mutex<()>>,
+}
+
+impl Default for NotiferSharedObjects {
+    fn default() -> Self {
+        Self {
+            notifier: Default::default(),
+            buffer: Arc::new(Mutex::new(Vec::with_capacity(EVENT_BUFFER_SIZE))),
+            waker: Default::default(),
+            check_guard: Default::default(),
+        }
+    }
 }
 
 struct HTTPServerNotifierSleeper {
@@ -212,10 +273,9 @@ impl HTTPServerNotifierSleeper {
         while !exit_signal {
             while let buffer = &mut self
                 .shared_data
-                .data
+                .buffer
                 .lock()
                 .expect("Server thread has panicked!")
-                .buffer
                 && buffer.is_empty()
             {
                 self.poller.wait(buffer);
@@ -225,22 +285,34 @@ impl HTTPServerNotifierSleeper {
                 .notifier
                 .wait_while(
                     self.shared_data
-                        .data
+                        .check_guard
                         .lock()
                         .expect("Server thread has panicked!"),
-                    |data| {
-                        let buffer_is_nonempty = !data.buffer.is_empty();
-                        match data.waker.take() {
+                    |_| {
+                        let buffer = self
+                            .shared_data
+                            .buffer
+                            .lock()
+                            .expect("Server thread has panicked!");
+                        let buffer_is_nonempty = !buffer.is_empty();
+                        drop(buffer);
+                        let mut waker_status = self
+                            .shared_data
+                            .waker
+                            .lock()
+                            .expect("Server thread has panicked!");
+                        match waker_status.take() {
                             WakerStatus::New(new_waker) => {
                                 waker.replace(new_waker);
                             }
                             WakerStatus::Closed => exit_signal = true,
                             WakerStatus::Waiting => {}
                         };
+                        drop(waker_status);
                         if buffer_is_nonempty && let Some(waker) = waker.take() {
                             waker.wake()
                         }
-                        !data.buffer.is_empty() && !exit_signal
+                        buffer_is_nonempty && !exit_signal
                     },
                 )
                 .expect("Server thread has panicked!");
@@ -283,9 +355,9 @@ impl Drop for HTTPServerNotifier {
         self.epoll_waker.set();
         let mut attempts = 0;
         while !self.notifier_thread.is_finished() && attempts < 100000 {
-            match self.shared_data.data.lock() {
-                Ok(mut data) => {
-                    data.waker = WakerStatus::Closed;
+            match self.shared_data.waker.lock() {
+                Ok(mut waker) => {
+                    *waker = WakerStatus::Closed;
                 }
                 Err(_) => return,
             }
@@ -295,28 +367,38 @@ impl Drop for HTTPServerNotifier {
     }
 }
 
-impl Future for &mut HTTPServerNotifier {
-    type Output = Vec<EPollEvent>;
+impl Future for &HTTPServerNotifier {
+    type Output = ServerEvent;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        let mut data = self
+        let guard = self
             .shared_data
-            .data
+            .check_guard
             .lock()
             .expect("Notifier thread panicked.");
-        if !data.buffer.is_empty() {
-            let events = Vec::from_iter(data.buffer.drain(..));
-            data.waker = WakerStatus::Waiting;
-            drop(data);
+        let mut waker = self
+            .shared_data
+            .waker
+            .lock()
+            .expect("Notifier thread panicked.");
+        if let Ok(mut buffer) = self.shared_data.buffer.try_lock()
+            && !buffer.is_empty()
+        {
+            let events = Vec::from_iter(buffer.drain(..));
+            *waker = WakerStatus::Waiting;
+            drop(waker);
+            drop(buffer);
+            drop(guard);
             self.shared_data.notifier.notify_one();
-            return Ready(events);
+            return Ready(ServerEvent::EPollEvents(events));
         }
 
-        data.waker = WakerStatus::New(cx.waker().clone());
-        drop(data);
+        *waker = WakerStatus::New(cx.waker().clone());
+        drop(waker);
+        drop(guard);
         self.shared_data.notifier.notify_one();
         Pending
     }

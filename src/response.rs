@@ -1,5 +1,7 @@
 use std::{collections::HashMap, fmt::Display};
 
+use tokio::task::JoinHandle;
+
 use crate::{header::Header, protocol::Protocol};
 
 #[derive(Debug, Clone, Copy)]
@@ -144,4 +146,9 @@ impl Display for Response {
         }
         Ok(())
     }
+}
+
+pub enum MaybeResponse {
+    Now(Response),
+    Later(JoinHandle<Response>),
 }

@@ -4,7 +4,7 @@ use crate::{
     connection::Connection,
     handler::{AnyHandler, AsyncHandler, Handler},
     request::Request,
-    response::{Response, ResponseCode},
+    response::{MaybeResponse, Response, ResponseCode},
 };
 
 pub struct PathParameterRouter {
@@ -53,13 +53,12 @@ impl<'a> BaseRouter {
         }
     }
 
-    pub async fn route(&mut self, connection: &mut Connection, request: &mut Request) -> Response {
+    pub fn route(&mut self, connection: &mut Connection, request: &mut Request) -> MaybeResponse {
         self.route_from_path(
             connection,
             request,
             &mut request.get_target().clone().split('/'),
         )
-        .await
     }
 
     fn resolve_route_mut(
@@ -148,21 +147,26 @@ impl<'a> BaseRouter {
             .register_async_handler(handler)
     }
 
-    async fn route_from_path(
+    fn route_from_path(
         &mut self,
         connection: &mut Connection,
         request: &'a mut Request,
         path: &mut Split<'a, char>,
-    ) -> Response {
+    ) -> MaybeResponse {
         match self
             .resolve_route_mut(path, request)
             .and_then(|router: &mut Self| router.handler.as_mut())
         {
-            Some(AnyHandler::Sync(handler)) => handler.handle(connection, request),
-            Some(AnyHandler::Async(async_handler)) => {
-                async_handler.handle(connection, request).await
+            Some(AnyHandler::Sync(handler)) => {
+                MaybeResponse::Now(handler.handle(connection, request))
             }
-            None => Response::new(ResponseCode::NotFound, request.get_protocol()),
+            Some(AnyHandler::Async(async_handler)) => {
+                MaybeResponse::Later(async_handler.handle(connection, request))
+            }
+            None => MaybeResponse::Now(Response::new(
+                ResponseCode::NotFound,
+                request.get_protocol(),
+            )),
         }
     }
 }

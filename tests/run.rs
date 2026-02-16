@@ -1,21 +1,23 @@
 use std::net::Ipv4Addr;
 
 use http_server::{
-    handler::Handler,
+    connection::Connection,
+    handler::{AsyncHandler, Handler},
+    request::Request,
     response::{Response, ResponseCode},
     router::BaseRouter,
     server::HTTPServer,
     socket::Socket,
 };
+use tokio::{
+    spawn,
+    time::{Duration, sleep},
+};
 
 struct EchoHandler {}
 
 impl Handler for EchoHandler {
-    fn handle(
-        &mut self,
-        _connection: &mut http_server::connection::Connection,
-        request: &http_server::request::Request,
-    ) -> Response {
+    fn handle(&mut self, _connection: &mut Connection, request: &Request) -> Response {
         let mut response =
             Response::new(ResponseCode::Ok, http_server::protocol::Protocol::Http1_0);
         let content = format!(
@@ -38,10 +40,34 @@ impl Handler for EchoHandler {
     }
 }
 
+struct SlowEchoHandler {
+    echo: EchoHandler,
+}
+
+impl AsyncHandler for SlowEchoHandler {
+    fn handle(
+        &mut self,
+        connection: &mut Connection,
+        request: &Request,
+    ) -> tokio::task::JoinHandle<Response> {
+        let response = self.echo.handle(connection, request);
+        spawn(async move {
+            sleep(Duration::from_secs(1)).await;
+            response
+        })
+    }
+}
+
 #[tokio::test]
 async fn run_server() {
     let mut router = BaseRouter::new();
     router.register_handler_from_path(EchoHandler {}, "/hello/{foo}/bar/baz/{biz}");
+    router.register_async_handler_from_path(
+        SlowEchoHandler {
+            echo: EchoHandler {},
+        },
+        "/slow/{foo}",
+    );
     println!("{}", router);
     let mut server = HTTPServer::new(
         Socket::new(5000, Ipv4Addr::new(127, 0, 0, 1)).unwrap(),
