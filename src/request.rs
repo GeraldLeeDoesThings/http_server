@@ -95,6 +95,10 @@ impl Request {
         self.header_fields.insert(header, field)
     }
 
+    pub const fn get_content(&self) -> &String {
+        &self.content
+    }
+
     pub fn new(
         method: Method,
         target: String,

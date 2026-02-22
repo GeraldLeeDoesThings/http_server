@@ -1,5 +1,6 @@
 use std::{collections::HashMap, fmt::Display};
 
+use serde::Serialize;
 use tokio::task::JoinHandle;
 
 use crate::{header::Header, protocol::Protocol};
@@ -115,8 +116,26 @@ impl Response {
         }
     }
 
+    pub fn from_json<T: Serialize>(
+        code: ResponseCode,
+        protocol: Protocol,
+        json: &T,
+    ) -> Result<Self, serde_json::Error> {
+        let mut result = Self::new(code, protocol);
+        result.set_json(json).map(|_| result)
+    }
+
     pub fn set_content(&mut self, content: Option<String>) {
         self.content = content;
+        match &self.content {
+            Some(content) => {
+                self.header_fields
+                    .insert(Header::ContentLength, content.len().to_string());
+            }
+            None => {
+                self.header_fields.remove(&Header::ContentLength);
+            }
+        }
     }
 
     pub const fn get_headers(&self) -> &HashMap<Header, String> {
@@ -125,6 +144,13 @@ impl Response {
 
     pub const fn get_headers_mut(&mut self) -> &mut HashMap<Header, String> {
         &mut self.header_fields
+    }
+
+    pub fn set_json<T: Serialize>(&mut self, object: &T) -> Result<(), serde_json::Error> {
+        self.set_content(Some(serde_json::to_string_pretty(object)?));
+        self.header_fields
+            .insert(Header::ContentType, "application/json".to_string());
+        Ok(())
     }
 }
 

@@ -2,13 +2,15 @@ use std::net::Ipv4Addr;
 
 use http_server::{
     connection::Connection,
-    handler::{AsyncHandler, Handler},
+    handler::{AsyncHandler, Handler, SchemaHandler},
+    impl_handler_for_schema_handler,
     request::Request,
     response::{Response, ResponseCode},
     router::BaseRouter,
     server::HTTPServer,
     socket::Socket,
 };
+use serde::{Deserialize, Serialize};
 use tokio::{
     spawn,
     time::{Duration, sleep},
@@ -58,10 +60,36 @@ impl AsyncHandler for SlowEchoHandler {
     }
 }
 
+#[derive(Deserialize, Serialize)]
+struct SimpleSchema {
+    foo: String,
+    bar: usize,
+}
+
+struct DoubleHandler {}
+
+impl SchemaHandler<SimpleSchema, Response> for DoubleHandler {
+    fn handle_schema(
+        &mut self,
+        _connection: &mut Connection,
+        request: &Request,
+        data: SimpleSchema,
+    ) -> Response {
+        let response_json: SimpleSchema = SimpleSchema {
+            foo: data.foo.repeat(2),
+            bar: data.bar * 2,
+        };
+        Response::from_json(ResponseCode::Ok, request.get_protocol(), &response_json).unwrap()
+    }
+}
+
+impl_handler_for_schema_handler!(DoubleHandler, SimpleSchema);
+
 #[tokio::test]
 async fn run_server() {
     let mut router = BaseRouter::new();
     router.register_handler_from_path(EchoHandler {}, "/hello/{foo}/bar/baz/{biz}");
+    router.register_handler_from_path(DoubleHandler {}, "/double");
     router.register_async_handler_from_path(
         SlowEchoHandler {
             echo: EchoHandler {},
