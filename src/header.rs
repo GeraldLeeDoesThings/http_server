@@ -12,6 +12,8 @@ pub enum Header {
     ReferrerPolicy,
     UserAgent,
 
+    Allow,
+
     Other(String),
 }
 
@@ -29,6 +31,8 @@ impl From<&str> for Header {
             "referer" => Self::Referer,
             "referrer-policy" => Self::ReferrerPolicy,
             "user-agent" => Self::UserAgent,
+
+            "allow" => Self::Allow,
 
             _ => Self::Other(value.to_string()),
         }
@@ -48,6 +52,7 @@ impl<'a> Header {
             Self::Referer => "Referer",
             Self::ReferrerPolicy => "Referrer-Policy",
             Self::UserAgent => "User-Agent",
+            Self::Allow => "Allow",
             Self::Other(header) => header.as_str(),
         }
     }

@@ -4,7 +4,7 @@ use http_server::{
     connection::Connection,
     handler::{AsyncHandler, Handler, SchemaHandler},
     impl_handler_for_schema_handler,
-    request::Request,
+    request::{Method, Request},
     response::{Response, ResponseCode},
     router::BaseRouter,
     server::HTTPServer,
@@ -88,13 +88,14 @@ impl_handler_for_schema_handler!(DoubleHandler, SimpleSchema);
 #[tokio::test]
 async fn run_server() {
     let mut router = BaseRouter::new();
-    router.register_handler_from_path(EchoHandler {}, "/hello/{foo}/bar/baz/{biz}");
-    router.register_handler_from_path(DoubleHandler {}, "/double");
+    router.register_handler_from_path(EchoHandler {}, "/hello/{foo}/bar/baz/{biz}", &[Method::Get]);
+    router.register_handler_from_path(DoubleHandler {}, "/double", &[Method::Get]);
     router.register_async_handler_from_path(
         SlowEchoHandler {
             echo: EchoHandler {},
         },
         "/slow/{foo}",
+        &[Method::Get],
     );
     println!("{}", router);
     let mut server = HTTPServer::new(

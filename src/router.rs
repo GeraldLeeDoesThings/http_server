@@ -3,7 +3,9 @@ use std::{collections::HashMap, fmt::Display, str::Split};
 use crate::{
     connection::Connection,
     handler::{AnyHandler, AsyncHandler, Handler},
-    request::Request,
+    header::Header,
+    method_multi_map::MethodMultiMap,
+    request::{Method, Request},
     response::{MaybeResponse, Response, ResponseCode},
 };
 
@@ -34,8 +36,14 @@ impl PathParameterRouter {
 
 pub struct BaseRouter {
     sub_routers: HashMap<String, Box<Self>>,
-    handler: Option<AnyHandler>,
+    handler_map: MethodMultiMap<AnyHandler>,
     wildcard: Option<Box<PathParameterRouter>>,
+}
+
+enum ResolvedPath<'a> {
+    Success(&'a mut AnyHandler),
+    PathResolutionFailed,
+    NoHandlerForMethod,
 }
 
 impl Default for BaseRouter {
@@ -48,7 +56,7 @@ impl<'a> BaseRouter {
     pub fn new() -> Self {
         Self {
             sub_routers: HashMap::new(),
-            handler: None,
+            handler_map: MethodMultiMap::new(),
             wildcard: None,
         }
     }
@@ -62,39 +70,50 @@ impl<'a> BaseRouter {
     }
 
     fn resolve_route_mut(
-        &mut self,
+        &'_ mut self,
         path: &mut Split<'a, char>,
         request: &mut Request,
-    ) -> Option<&mut Self> {
+    ) -> ResolvedPath<'_> {
         match path.next() {
             Some(next) => self
                 .sub_routers
                 .get_mut(next)
-                .and_then(|router| router.resolve_route_mut(path, request))
-                .or_else(|| {
-                    self.wildcard.as_mut().and_then(|path_router| {
-                        path_router
-                            .consume_path_param(next, request)
-                            .resolve_route_mut(path, request)
-                    })
+                .map(|router| router.resolve_route_mut(path, request))
+                .unwrap_or_else(|| {
+                    self.wildcard
+                        .as_mut()
+                        .map(|path_router| {
+                            path_router
+                                .consume_path_param(next, request)
+                                .resolve_route_mut(path, request)
+                        })
+                        .unwrap_or(ResolvedPath::PathResolutionFailed)
                 }),
-            None => Some(self),
+            None => self
+                .handler_map
+                .map_mut(request.get_method())
+                .map_or(ResolvedPath::NoHandlerForMethod, |handler| {
+                    ResolvedPath::Success(handler)
+                }),
         }
     }
 
     pub fn register_handler<T: Handler + Send + 'static>(
         &mut self,
         handler: T,
-    ) -> Option<AnyHandler> {
-        self.handler.replace(AnyHandler::from_handler(handler))
+        methods: &[Method],
+    ) {
+        self.handler_map
+            .insert(AnyHandler::from_handler(handler), methods);
     }
 
     pub fn register_async_handler<T: AsyncHandler + Send + 'static>(
         &mut self,
         handler: T,
-    ) -> Option<AnyHandler> {
-        self.handler
-            .replace(AnyHandler::from_async_handler(handler))
+        methods: &[Method],
+    ) {
+        self.handler_map
+            .insert(AnyHandler::from_async_handler(handler), methods);
     }
 
     pub fn create_route(&mut self, path: &mut Split<'a, char>) -> &mut Self {
@@ -133,18 +152,20 @@ impl<'a> BaseRouter {
         &mut self,
         handler: T,
         path: &str,
-    ) -> Option<AnyHandler> {
+        methods: &[Method],
+    ) {
         self.create_route(&mut path.split('/'))
-            .register_handler(handler)
+            .register_handler(handler, methods);
     }
 
     pub fn register_async_handler_from_path<T: AsyncHandler + Send + 'static>(
         &mut self,
         handler: T,
         path: &str,
-    ) -> Option<AnyHandler> {
+        methods: &[Method],
+    ) {
         self.create_route(&mut path.split('/'))
-            .register_async_handler(handler)
+            .register_async_handler(handler, methods)
     }
 
     fn route_from_path(
@@ -153,29 +174,40 @@ impl<'a> BaseRouter {
         request: &'a mut Request,
         path: &mut Split<'a, char>,
     ) -> MaybeResponse {
-        match self
-            .resolve_route_mut(path, request)
-            .and_then(|router: &mut Self| router.handler.as_mut())
-        {
-            Some(AnyHandler::Sync(handler)) => {
+        match self.resolve_route_mut(path, request) {
+            ResolvedPath::Success(AnyHandler::Sync(handler)) => {
                 MaybeResponse::Now(handler.handle(connection, request))
             }
-            Some(AnyHandler::Async(async_handler)) => {
+            ResolvedPath::Success(AnyHandler::Async(async_handler)) => {
                 MaybeResponse::Later(async_handler.handle(connection, request))
             }
-            None => MaybeResponse::Now(Response::new(
+            ResolvedPath::PathResolutionFailed => MaybeResponse::Now(Response::new(
                 ResponseCode::NotFound,
                 request.get_protocol(),
             )),
+            ResolvedPath::NoHandlerForMethod => {
+                let mut response =
+                    Response::new(ResponseCode::MethodNotAllowed, request.get_protocol());
+                response.get_headers_mut().insert(
+                    Header::Allow,
+                    self.handler_map
+                        .iter_mapped_methods()
+                        .map(|method| method.as_str())
+                        .intersperse(", ")
+                        .collect(),
+                );
+                MaybeResponse::Now(response)
+            }
         }
     }
 }
 
 impl Display for BaseRouter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.handler {
-            Some(_) => writeln!(f, "Handled")?,
-            None => writeln!(f, "Default")?,
+        if self.handler_map.iter_mapped_methods().count() > 0 {
+            writeln!(f, "Handled")?;
+        } else {
+            writeln!(f, "Default")?;
         }
         for (name, router) in &self.sub_routers {
             write!(f, "{} -> {}", name, router)?;

@@ -1,9 +1,12 @@
 #![warn(clippy::all, clippy::nursery)]
 #![feature(box_into_inner)]
 #![feature(const_default)]
+#![feature(const_destruct)]
 #![feature(const_trait_impl)]
+#![feature(iter_intersperse)]
 #![feature(lock_value_accessors)]
 #![feature(map_try_insert)]
+#![feature(variant_count)]
 
 pub mod connection;
 pub mod epoll;
@@ -11,6 +14,7 @@ pub mod error_utils;
 pub mod event;
 pub mod handler;
 pub mod header;
+pub mod method_multi_map;
 pub mod protocol;
 pub mod request;
 pub mod response;

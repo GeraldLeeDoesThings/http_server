@@ -2,7 +2,7 @@ use std::{collections::HashMap, fmt::Display};
 
 use crate::{header::Header, protocol::Protocol};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Method {
     Get,
     Head,
@@ -14,6 +14,18 @@ pub enum Method {
     Trace,
     Patch,
 }
+
+pub const METHODS: [Method; 9] = [
+    Method::Get,
+    Method::Head,
+    Method::Post,
+    Method::Put,
+    Method::Delete,
+    Method::Connect,
+    Method::Options,
+    Method::Trace,
+    Method::Patch,
+];
 
 impl<'a> TryFrom<&'a str> for Method {
     type Error = &'a str;
@@ -47,6 +59,10 @@ impl Method {
             Self::Trace => "TRACE",
             Self::Patch => "PATCH",
         }
+    }
+
+    pub const fn index(&self) -> usize {
+        *self as usize
     }
 }
 
@@ -97,6 +113,10 @@ impl Request {
 
     pub const fn get_content(&self) -> &String {
         &self.content
+    }
+
+    pub const fn get_method(&self) -> &Method {
+        &self.method
     }
 
     pub fn new(
